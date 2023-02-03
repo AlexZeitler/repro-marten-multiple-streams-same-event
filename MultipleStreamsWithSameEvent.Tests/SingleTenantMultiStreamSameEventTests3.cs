@@ -1,9 +1,10 @@
 using Marten;
+using Marten.Events.Aggregation;
 using Marten.Events.Projections;
 using Npgsql;
 using Shouldly;
 
-namespace MultipleStreamsWithSameEvent.Tests;
+namespace MultipleStreamsWithSameEvent.Tests3;
 
 public class SingleTenantTests
 {
@@ -29,15 +30,16 @@ public class SingleTenantTests
     await session.SaveChangesAsync();
 
     var assigned = new EmployeeAssignedToTeam(teamStreamId, employeeStreamId);
-    session.Events.Append(employeeStreamId, assigned);
     session.Events.Append(teamStreamId, assigned);
+    session.Events.Append(employeeStreamId, assigned);
     await session.SaveChangesAsync();
 
     var employee = session.Load<Employee>(employeeStreamId);
-    var team = session.Load<Team>(teamStreamId);
-
     employee.Teams.ShouldContain(x => x == teamStreamId);
-    team.Employees.ShouldContain(x => x == employeeStreamId);
+
+    var team = session.Load<Team>(teamStreamId);
+    team.ShouldNotBeNull();
+    team.Employees.ShouldContain(e => e == assigned.EmployeeId);
   }
 }
 
@@ -60,8 +62,8 @@ public static class TestEventStore
       _ =>
       {
         _.Connection(connectionString);
-        _.Projections.SelfAggregate<Employee>(ProjectionLifecycle.Inline);
-        _.Projections.SelfAggregate<Team>(ProjectionLifecycle.Inline);
+        _.Projections.Add<EmployeeProjection>(ProjectionLifecycle.Inline);
+        _.Projections.Add<TeamProjection>(ProjectionLifecycle.Inline);
       }
     );
   }
@@ -87,21 +89,6 @@ public class Team
   public Guid Id { get; set; }
   public string Name { get; set; }
   public List<Guid> Employees { get; set; }
-
-  public void Apply(
-    TeamFounded founded
-  )
-  {
-    Name = founded.Name;
-    Employees = new();
-  }
-
-  public void Apply(
-    EmployeeAssignedToTeam assignedToTeam
-  )
-  {
-    Employees.Add(assignedToTeam.EmployeeId);
-  }
 }
 
 public class Employee
@@ -110,20 +97,48 @@ public class Employee
   public string Name { get; set; }
   public string Email { get; set; }
   public List<Guid> Teams { get; set; }
+}
 
-  public void Apply(
-    EmployeeRegistered registered
+public class TeamProjection : SingleStreamAggregation<Team>
+{
+  public Team Create(
+    TeamFounded founded
   )
   {
-    Name = $"{registered.Firstname} {registered.Lastname}";
-    Email = registered.Email;
-    Teams = new();
+    return new Team
+    {
+      Name = founded.Name,
+      Employees = new()
+    };
   }
 
   public void Apply(
-    EmployeeAssignedToTeam assignedToTeam
+    EmployeeAssignedToTeam assignedToTeam,
+    Team team
   )
   {
-    Teams.Add(assignedToTeam.TeamId);
+    team.Employees.Add(assignedToTeam.EmployeeId);
+  }
+}
+
+public class EmployeeProjection : SingleStreamAggregation<Employee>
+{
+  public Employee Create(
+    EmployeeRegistered registered
+  )
+  {
+    return new Employee
+    {
+      Name = registered.Firstname,
+      Teams = new()
+    };
+  }
+
+  public void Apply(
+    EmployeeAssignedToTeam assignedToTeam,
+    Employee employee
+  )
+  {
+    employee.Teams.Add(assignedToTeam.TeamId);
   }
 }
